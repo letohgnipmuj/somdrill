@@ -1,4 +1,5 @@
 # Drill Checker Context
+Permanent context file on everything drills and non-technical
 
 ## Overview
 
