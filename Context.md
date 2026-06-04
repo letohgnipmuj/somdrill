@@ -70,8 +70,8 @@ A typical drill page contains (in visual order):
 ## Implementation Constraints & Considerations
 
 ### Input & Auto-Detection
-- Operation type and digit ranges **must be specified** by user or auto-detected (TBD) — not reliably extractable from photo
-- Drill type (normal vs. long) can be inferred from grid dimensions or user input
+- Operation type and digit ranges **must be specified** by user — for speed and accuracy
+- Drill type (normal vs. long) taken from user input
 
 ### Recognition Challenges
 - Handwriting varies widely (messy to neat)
@@ -88,6 +88,8 @@ A typical drill page contains (in visual order):
 ---
 
 ## Future Enhancements (Out of Scope for MVP)
+- Autodetection of drill type ("normal" vs "long")
+- Autodetection of main operation
 - Support for "Big" drills (long multiplication/division)
 - Diagonal line detection for marking time-limit boundary
 - Continued-practice detection beyond time limit
