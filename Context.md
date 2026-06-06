@@ -21,6 +21,7 @@ Each drill consists of:
 - **Operation symbol**: Single symbol (+, −, ×, ÷) indicating drill type, positioned above generated numbers and to the left of numbers along the top
 
 Students solve: `Generated Number [OP] Number Along Top` for each cell, proceeding column-by-column from left to right.
+- Arguments can range in digits and sign (+ or -) across different types of drills, but stay consistent within each. For example, 2x2 addition or 3x1 integer multiplication.
 
 ### Drill Types
 
