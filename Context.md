@@ -89,9 +89,43 @@ A typical drill page contains (in visual order):
 
 ---
 
+## MVP Implementation Details
+
+### Scope (Phase 1)
+- **Drill types supported**: Normal drills only (5 across × 8 down grid, max score 40)
+- **Long drills**: Deferred to Phase 2
+- **Big drills**: Deferred to Phase 3
+
+### User Flow
+1. **Input Parameters**: User specifies operation type (+, −, ×, ÷) and digit ranges for generated numbers & numbers along top
+2. **Photo Capture**: Upload or capture photo of completed drill
+3. **Image Processing**: Extract grid, detect marked answers, apply OCR
+4. **Initial Results**: Display all 40 individual answers with pass/fail status + column subtotals
+5. **Verification**: User can correct any misread answers before finalizing score
+6. **Final Score**: Display corrected column totals and total score
+
+### Tech Stack
+- **Frontend**: React + TypeScript + Vite (web app, mobile-responsive)
+- **OCR**: Tesseract.js (client-side, open-source)
+- **Deployment**: Mobile-accessible web app (no native apps)
+- **Data**: Stateless MVP (no persistence/accounts; can add in Phase 2)
+
+### Accuracy & Validation
+- **Target accuracy**: 90% on auto-detected answers
+- **Training data**: Use existing collection of marked normal drills for validation
+- **Verification step**: Users review & correct errors before final submission
+
+### Development Environment
+- Windows-only development
+- Fast iteration cycle prioritized
+- Compromise on perfection where technically inefficient
+
 ## Future Enhancements (Out of Scope for MVP)
 - Autodetection of drill type ("normal" vs "long")
 - Autodetection of main operation
 - Support for "Big" drills (long multiplication/division)
+- Support for "long" drills (10 across x 8 down grid)
 - Diagonal line detection for marking time-limit boundary
 - Continued-practice detection beyond time limit
+- Data persistence & user accounts
+- Backend OCR processing for improved accuracy
