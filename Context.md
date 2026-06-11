@@ -54,6 +54,8 @@ A typical drill page contains (in visual order):
 
 **Spacing note:** Detached row/column kept 0.2−1 cm separate from main grid, usually with thicker borders for distinction.
 
+Note: Each page can contain up to 4 "normal" (1 in each corner) or 2 "long" (top and bottom)
+
 ---
 
 ## Answer & Marking Format
