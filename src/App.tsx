@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { inspectImage } from './imageProcessing';
+import { detectNormalDrillLayout } from './layoutDetection';
 import type { PreflightResult } from './types';
 
 const DEFAULT_HINTS = [
@@ -16,6 +17,7 @@ export default function App() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PreflightResult | null>(null);
+  const [layout, setLayout] = useState<Awaited<ReturnType<typeof detectNormalDrillLayout>> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function handleFile(file: File | null) {
@@ -23,11 +25,16 @@ export default function App() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setLayout(null);
     setFileName(file.name);
 
     try {
       const analysis = await inspectImage(file);
       setResult(analysis);
+      if (analysis.status === 'pass' && analysis.normalizedDataUrl) {
+        const detectedLayout = await detectNormalDrillLayout(analysis.normalizedDataUrl);
+        setLayout(detectedLayout);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to analyze the image.');
     } finally {
@@ -132,7 +139,75 @@ export default function App() {
             {result.status === 'pass' && result.normalizedDataUrl && (
               <div className="preview">
                 <h3>Normalized preview</h3>
-                <img src={result.normalizedDataUrl} alt="Normalized drill preview" />
+                <div className="preview-stage">
+                  <img src={result.normalizedDataUrl} alt="Normalized drill preview" />
+                  {layout?.status === 'pass' && (
+                    <svg
+                      className="overlay"
+                      viewBox={`0 0 ${result.normalizedWidth} ${result.normalizedHeight}`}
+                      aria-hidden="true"
+                    >
+                      {layout.overlayRects.map((rect) => (
+                        <rect
+                          key={rect.label}
+                          x={rect.x}
+                          y={rect.y}
+                          width={rect.width}
+                          height={rect.height}
+                          className={`overlay-rect overlay-${rect.label.toLowerCase().replaceAll(' ', '-')}`}
+                        />
+                      ))}
+                    </svg>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {layout && (
+              <div className={`layout-summary layout-${layout.status}`}>
+                <div className="layout-header">
+                  <div>
+                    <p className="summary-label">Layout detection</p>
+                    <h3>{layout.status === 'pass' ? 'Normal drill structure found' : 'Layout not found'}</h3>
+                  </div>
+                  <StatusBadge status={layout.status} />
+                </div>
+                {layout.status === 'pass' ? (
+                  <div className="layout-grid">
+                    <div>
+                      <span>Orientation</span>
+                      <strong>{layout.orientation}°</strong>
+                    </div>
+                    <div>
+                      <span>Confidence</span>
+                      <strong>{Math.round(layout.confidence * 100)}%</strong>
+                    </div>
+                    <div>
+                      <span>Answer grid</span>
+                      <strong>
+                        {Math.round(layout.answerGrid.rect.width)} x {Math.round(layout.answerGrid.rect.height)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Top row</span>
+                      <strong>
+                        {Math.round(layout.topRow.rect.width)} x {Math.round(layout.topRow.rect.height)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Left column</span>
+                      <strong>
+                        {Math.round(layout.leftColumn.rect.width)} x {Math.round(layout.leftColumn.rect.height)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Warnings</span>
+                      <strong>{layout.warning ?? 'None'}</strong>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="layout-warning">{layout.warning ?? 'Unable to locate the grid.'}</p>
+                )}
               </div>
             )}
           </div>
