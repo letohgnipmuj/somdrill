@@ -1,11 +1,11 @@
 import type { PreflightMetric, PreflightResult } from './types';
 
 const MAX_DIMENSION = 1800;
-const MIN_DIMENSION = 600;
+const MIN_SHORT_SIDE = 320;
 const BLUR_THRESHOLD = 7.5;
 const EXTREME_LIGHT_THRESHOLD = 238;
 const EXTREME_DARK_THRESHOLD = 18;
-const MIN_VARIANCE_THRESHOLD = 1350;
+const MIN_VARIANCE_THRESHOLD = 300;
 const MIN_FOREGROUND_RATIO = 0.012;
 
 type Analysis = {
@@ -174,7 +174,7 @@ export async function inspectImage(file: File): Promise<PreflightResult> {
   const metrics = buildMetrics(analysis);
 
   const reasons: string[] = [];
-  if (normalizedWidth < MIN_DIMENSION || normalizedHeight < MIN_DIMENSION) {
+  if (Math.min(normalizedWidth, normalizedHeight) < MIN_SHORT_SIDE) {
     reasons.push('Image is too small to analyze reliably.');
   }
   if (analysis.variance < MIN_VARIANCE_THRESHOLD) {
