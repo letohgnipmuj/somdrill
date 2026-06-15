@@ -7,6 +7,9 @@ const MIN_LINE_DARK_RATIO = 0.14;
 const MIN_GRID_SCORE = 0.18;
 const MIN_LINE_SPACING = 18;
 const MAX_LINE_SPACING_VARIANCE = 0.35;
+const REGION_PADDING_CELL = 0.22;
+const SUBTOTAL_OFFSET_CELL = 0.18;
+const TOTAL_OFFSET_CELL = 0.28;
 
 export type Rect = {
   x: number;
@@ -205,21 +208,17 @@ function rectFromLines(vertical: GridLine[], horizontal: GridLine[]): Rect {
   };
 }
 
-function cellsFromGrid(bounds: Rect, columns: number, rows: number) {
-  const cellWidth = bounds.width / columns;
-  const cellHeight = bounds.height / rows;
-  const cells: Rect[] = [];
-  for (let row = 0; row < rows; row += 1) {
-    for (let col = 0; col < columns; col += 1) {
-      cells.push({
-        x: bounds.x + col * cellWidth,
-        y: bounds.y + row * cellHeight,
-        width: cellWidth,
-        height: cellHeight,
-      });
-    }
-  }
-  return cells;
+function expandRect(rect: Rect, padX: number, padY: number, maxWidth: number, maxHeight: number): Rect {
+  const x = clamp(rect.x - padX, 0, maxWidth);
+  const y = clamp(rect.y - padY, 0, maxHeight);
+  const right = clamp(rect.x + rect.width + padX, 0, maxWidth);
+  const bottom = clamp(rect.y + rect.height + padY, 0, maxHeight);
+  return {
+    x,
+    y,
+    width: Math.max(1, right - x),
+    height: Math.max(1, bottom - y),
+  };
 }
 
 function region(rect: Rect, confidence: number): LayoutRegion {
@@ -299,15 +298,15 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
   const bounds = rectFromLines(gridVertical, gridHorizontal);
   const cellWidth = bounds.width / NORMAL_COLUMNS;
   const cellHeight = bounds.height / NORMAL_ROWS;
-  const topRowHeight = cellHeight * 0.9;
-  const leftColumnWidth = cellWidth * 0.95;
-  const subtotalHeight = cellHeight * 0.85;
-  const totalHeight = cellHeight * 0.85;
+  const topRowHeight = cellHeight * 0.92;
+  const leftColumnWidth = cellWidth * 0.92;
+  const subtotalHeight = cellHeight * 0.9;
+  const totalHeight = cellHeight * 0.9;
 
-  const answerGridRect = bounds;
+  const answerGridRect = expandRect(bounds, cellWidth * REGION_PADDING_CELL, cellHeight * REGION_PADDING_CELL, rotated.width, rotated.height);
   const topRowRect = {
     x: bounds.x,
-    y: Math.max(0, bounds.y - topRowHeight - cellHeight * 0.18),
+    y: Math.max(0, bounds.y - topRowHeight - cellHeight * SUBTOTAL_OFFSET_CELL),
     width: bounds.width,
     height: topRowHeight,
   };
@@ -319,14 +318,14 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
   };
   const subtotalRect = {
     x: bounds.x,
-    y: clamp(bounds.y + bounds.height + cellHeight * 0.15, 0, rotated.height),
-    width: bounds.width,
+    y: clamp(bounds.y + bounds.height + cellHeight * SUBTOTAL_OFFSET_CELL, 0, rotated.height),
+    width: Math.max(bounds.width * 0.95, cellWidth * 3.5),
     height: subtotalHeight,
   };
   const totalRect = {
     x: bounds.x,
-    y: clamp(subtotalRect.y + subtotalRect.height + cellHeight * 0.1, 0, rotated.height),
-    width: cellWidth * 1.7,
+    y: clamp(subtotalRect.y + subtotalRect.height + cellHeight * TOTAL_OFFSET_CELL * 0.4, 0, rotated.height),
+    width: cellWidth * 2.2,
     height: totalHeight,
   };
 

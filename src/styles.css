@@ -242,6 +242,12 @@ h1 {
 
 .preview-stage {
   position: relative;
+  width: 100%;
+}
+
+.preview-stage img {
+  width: 100%;
+  height: auto;
 }
 
 .overlay {

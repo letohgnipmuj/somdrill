@@ -46,7 +46,7 @@ export default function App() {
     <main className="shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">Cycle 2 prototype</p>
+          <p className="eyebrow">Version 0</p>
           <h1>Drill Checker intake</h1>
           <p className="lede">
             Upload a cropped drill image. The app performs a simple preflight check and prepares a normalized
@@ -139,7 +139,10 @@ export default function App() {
             {result.status === 'pass' && result.normalizedDataUrl && (
               <div className="preview">
                 <h3>Normalized preview</h3>
-                <div className="preview-stage">
+                <div
+                  className="preview-stage"
+                  style={{ aspectRatio: `${result.normalizedWidth} / ${result.normalizedHeight}` }}
+                >
                   <img src={result.normalizedDataUrl} alt="Normalized drill preview" />
                   {layout?.status === 'pass' && (
                     <svg
