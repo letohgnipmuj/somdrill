@@ -1,15 +1,11 @@
-import type { PreflightResult } from './types';
-
 const NORMAL_COLUMNS = 5;
 const NORMAL_ROWS = 8;
-const BAND_THRESHOLD_RATIO = 0.28;
-const MIN_LINE_DARK_RATIO = 0.14;
-const MIN_GRID_SCORE = 0.18;
-const MIN_LINE_SPACING = 18;
-const MAX_LINE_SPACING_VARIANCE = 0.35;
-const REGION_PADDING_CELL = 0.22;
-const SUBTOTAL_OFFSET_CELL = 0.18;
-const TOTAL_OFFSET_CELL = 0.28;
+const BAND_THRESHOLD_RATIO = 0.22;
+const MIN_GRID_SCORE = 0.14;
+const MIN_LINE_SPACING = 14;
+const MAX_LINE_SPACING_VARIANCE = 0.42;
+const CELL_PADDING_RATIO = 0.18;
+const FIELD_PADDING_RATIO = 0.1;
 
 export type Rect = {
   x: number;
@@ -24,22 +20,17 @@ export type GridLine = {
   strength: number;
 };
 
-export type LayoutRegion = {
-  rect: Rect;
-  confidence: number;
-};
-
 export type LayoutDetectionResult = {
   status: 'pass' | 'fail';
   confidence: number;
   warning?: string;
   orientation: 0 | 90 | 180 | 270;
   bounds: Rect;
-  answerGrid: LayoutRegion;
-  topRow: LayoutRegion;
-  leftColumn: LayoutRegion;
-  subtotalArea: LayoutRegion;
-  totalArea: LayoutRegion;
+  answerCells: Rect[];
+  topRowCells: Rect[];
+  leftColumnCells: Rect[];
+  subtotalRects: Rect[];
+  totalRect: Rect | null;
   verticalLines: GridLine[];
   horizontalLines: GridLine[];
   overlayRects: Array<Rect & { label: string }>;
@@ -49,6 +40,20 @@ type ImageDataLike = {
   width: number;
   height: number;
   data: Uint8ClampedArray;
+};
+
+type LineScanResult = {
+  position: number;
+  thickness: number;
+  strength: number;
+};
+
+type OrientationResult = {
+  orientation: 0 | 90 | 180 | 270;
+  score: number;
+  imageData: ImageDataLike;
+  verticalLines: GridLine[];
+  horizontalLines: GridLine[];
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -122,48 +127,56 @@ function rotateImageData(imageData: ImageDataLike, rotation: 0 | 90 | 180 | 270)
   return { width: dstWidth, height: dstHeight, data: dst };
 }
 
-function estimateBands(
-  imageData: ImageDataLike,
-  axis: 'x' | 'y',
-): GridLine[] {
+function scanLines(imageData: ImageDataLike, axis: 'x' | 'y'): LineScanResult[] {
   const { width, height, data } = imageData;
   const length = axis === 'x' ? width : height;
   const cross = axis === 'x' ? height : width;
-  const scores: number[] = new Array(length).fill(0);
+  const scans: LineScanResult[] = [];
 
   for (let primary = 0; primary < length; primary += 1) {
     let darkPixels = 0;
-    let total = 0;
+    let edgeChanges = 0;
+    let lastDark = false;
+
     for (let secondary = 0; secondary < cross; secondary += 1) {
       const x = axis === 'x' ? primary : secondary;
       const y = axis === 'x' ? secondary : primary;
       const idx = (y * width + x) * 4;
       const gray = toGray(data, idx);
-      if (gray < 170) {
-        darkPixels += 1;
-      }
-      total += 1;
+      const isDark = gray < 170;
+      if (isDark) darkPixels += 1;
+      if (secondary > 0 && isDark !== lastDark) edgeChanges += 1;
+      lastDark = isDark;
     }
-    scores[primary] = darkPixels / total;
+
+    const darkRatio = darkPixels / cross;
+    const continuity = edgeChanges / cross;
+    const strength = darkRatio * 0.8 + continuity * 0.2;
+    scans.push({ position: primary, thickness: 1, strength });
   }
 
+  return scans;
+}
+
+function collectPeaks(scans: LineScanResult[]): GridLine[] {
   const peaks: GridLine[] = [];
-  for (let i = 1; i < scores.length - 1; i += 1) {
-    const score = scores[i];
-    if (score < BAND_THRESHOLD_RATIO) continue;
-    if (score < scores[i - 1] || score < scores[i + 1]) continue;
+  for (let i = 1; i < scans.length - 1; i += 1) {
+    const current = scans[i];
+    if (current.strength < BAND_THRESHOLD_RATIO) continue;
+    if (current.strength < scans[i - 1].strength || current.strength < scans[i + 1].strength) continue;
 
     let start = i;
     let end = i;
-    while (start > 0 && scores[start - 1] >= BAND_THRESHOLD_RATIO * 0.7) start -= 1;
-    while (end < scores.length - 1 && scores[end + 1] >= BAND_THRESHOLD_RATIO * 0.7) end += 1;
-
-    const position = Math.round((start + end) / 2);
-    const thickness = end - start + 1;
-    peaks.push({ position, thickness, strength: score });
+    while (start > 0 && scans[start - 1].strength >= BAND_THRESHOLD_RATIO * 0.68) start -= 1;
+    while (end < scans.length - 1 && scans[end + 1].strength >= BAND_THRESHOLD_RATIO * 0.68) end += 1;
+    const strength = scans.slice(start, end + 1).reduce((sum, line) => sum + line.strength, 0) / (end - start + 1);
+    peaks.push({
+      position: Math.round((start + end) / 2),
+      thickness: end - start + 1,
+      strength,
+    });
     i = end;
   }
-
   return peaks.sort((a, b) => b.strength - a.strength);
 }
 
@@ -195,19 +208,6 @@ function pickBestSequence(lines: GridLine[], count: number): GridLine[] | null {
   return best?.sequence ?? null;
 }
 
-function rectFromLines(vertical: GridLine[], horizontal: GridLine[]): Rect {
-  const left = vertical[0].position;
-  const right = vertical[vertical.length - 1].position;
-  const top = horizontal[0].position;
-  const bottom = horizontal[horizontal.length - 1].position;
-  return {
-    x: left,
-    y: top,
-    width: Math.max(1, right - left),
-    height: Math.max(1, bottom - top),
-  };
-}
-
 function expandRect(rect: Rect, padX: number, padY: number, maxWidth: number, maxHeight: number): Rect {
   const x = clamp(rect.x - padX, 0, maxWidth);
   const y = clamp(rect.y - padY, 0, maxHeight);
@@ -221,27 +221,142 @@ function expandRect(rect: Rect, padX: number, padY: number, maxWidth: number, ma
   };
 }
 
-function region(rect: Rect, confidence: number): LayoutRegion {
-  return { rect, confidence: clamp(confidence, 0, 1) };
+function rectFromLines(vertical: GridLine[], horizontal: GridLine[]): Rect {
+  return {
+    x: vertical[0].position,
+    y: horizontal[0].position,
+    width: Math.max(1, vertical[vertical.length - 1].position - vertical[0].position),
+    height: Math.max(1, horizontal[horizontal.length - 1].position - horizontal[0].position),
+  };
 }
 
-function scoreOrientation(imageData: ImageDataLike, orientation: 0 | 90 | 180 | 270) {
-  const rotated = rotateImageData(imageData, orientation);
-  const verticalBands = estimateBands(rotated, 'x');
-  const horizontalBands = estimateBands(rotated, 'y');
-  const gridVertical = pickBestSequence(verticalBands, NORMAL_COLUMNS + 1);
-  const gridHorizontal = pickBestSequence(horizontalBands, NORMAL_ROWS + 1);
-  if (!gridVertical || !gridHorizontal) {
-    return { score: 0, rotated, verticalBands, horizontalBands };
+function cellRectsFromLines(vertical: GridLine[], horizontal: GridLine[], paddingRatio: number): Rect[] {
+  const rects: Rect[] = [];
+  for (let row = 0; row < horizontal.length - 1; row += 1) {
+    for (let col = 0; col < vertical.length - 1; col += 1) {
+      const left = vertical[col].position;
+      const right = vertical[col + 1].position;
+      const top = horizontal[row].position;
+      const bottom = horizontal[row + 1].position;
+      const width = right - left;
+      const height = bottom - top;
+      const padX = width * paddingRatio;
+      const padY = height * paddingRatio;
+      rects.push({
+        x: left + padX,
+        y: top + padY,
+        width: Math.max(1, width - padX * 2),
+        height: Math.max(1, height - padY * 2),
+      });
+    }
+  }
+  return rects;
+}
+
+function fieldRectsFromGrid(
+  bounds: Rect,
+  vertical: GridLine[],
+  horizontal: GridLine[],
+  imageWidth: number,
+  imageHeight: number,
+) {
+  const cellWidth = bounds.width / NORMAL_COLUMNS;
+  const cellHeight = bounds.height / NORMAL_ROWS;
+  const answerCells = cellRectsFromLines(vertical, horizontal, CELL_PADDING_RATIO);
+  const topRowCells: Rect[] = [];
+  const leftColumnCells: Rect[] = [];
+  const subtotalRects: Rect[] = [];
+
+  const topBandHeight = cellHeight * 0.9;
+  const leftBandWidth = cellWidth * 0.95;
+  const subtotalBandHeight = cellHeight * 0.85;
+  const totalBandHeight = cellHeight * 0.9;
+
+  for (let col = 0; col < NORMAL_COLUMNS; col += 1) {
+    const left = vertical[col].position;
+    const right = vertical[col + 1].position;
+    const width = right - left;
+    topRowCells.push({
+      x: left + width * FIELD_PADDING_RATIO,
+      y: Math.max(0, bounds.y - topBandHeight - cellHeight * 0.2),
+      width: Math.max(1, width - width * FIELD_PADDING_RATIO * 2),
+      height: topBandHeight,
+    });
   }
 
-  const verticalStrength = gridVertical.reduce((sum, line) => sum + line.strength, 0) / gridVertical.length;
-  const horizontalStrength = gridHorizontal.reduce((sum, line) => sum + line.strength, 0) / gridHorizontal.length;
-  const bounds = rectFromLines(gridVertical, gridHorizontal);
-  const areaRatio = (bounds.width * bounds.height) / (rotated.width * rotated.height);
-  const score = verticalStrength + horizontalStrength + areaRatio;
+  for (let row = 0; row < NORMAL_ROWS; row += 1) {
+    const top = horizontal[row].position;
+    const bottom = horizontal[row + 1].position;
+    const height = bottom - top;
+    leftColumnCells.push({
+      x: Math.max(0, bounds.x - leftBandWidth - cellWidth * 0.14),
+      y: top + height * FIELD_PADDING_RATIO,
+      width: leftBandWidth,
+      height: Math.max(1, height - height * FIELD_PADDING_RATIO * 2),
+    });
+  }
 
-  return { score, rotated, verticalBands, horizontalBands };
+  for (let col = 0; col < NORMAL_COLUMNS; col += 1) {
+    const left = vertical[col].position;
+    const right = vertical[col + 1].position;
+    const width = right - left;
+    subtotalRects.push({
+      x: left + width * 0.18,
+      y: clamp(bounds.y + bounds.height + cellHeight * 0.2, 0, imageHeight),
+      width: Math.max(1, width * 0.65),
+      height: subtotalBandHeight,
+    });
+  }
+
+  const totalRect: Rect = {
+    x: vertical[0].position,
+    y: clamp(bounds.y + bounds.height + subtotalBandHeight + cellHeight * 0.32, 0, imageHeight),
+    width: Math.max(1, vertical[1].position - vertical[0].position + cellWidth * 0.25),
+    height: totalBandHeight,
+  };
+
+  return {
+    answerCells,
+    topRowCells,
+    leftColumnCells,
+    subtotalRects,
+    totalRect,
+  };
+}
+
+function scoreLayout(
+  imageData: ImageDataLike,
+  vertical: GridLine[],
+  horizontal: GridLine[],
+): number {
+  const bounds = rectFromLines(vertical, horizontal);
+  const coverage = (bounds.width * bounds.height) / (imageData.width * imageData.height);
+  const verticalStrength = vertical.reduce((sum, line) => sum + line.strength, 0) / vertical.length;
+  const horizontalStrength = horizontal.reduce((sum, line) => sum + line.strength, 0) / horizontal.length;
+  return verticalStrength * 0.4 + horizontalStrength * 0.4 + coverage * 0.2;
+}
+
+function detectOrientation(imageData: ImageDataLike, orientation: 0 | 90 | 180 | 270): OrientationResult | null {
+  const rotated = rotateImageData(imageData, orientation);
+  const verticalScans = collectPeaks(scanLines(rotated, 'x'));
+  const horizontalScans = collectPeaks(scanLines(rotated, 'y'));
+  const verticalLines = pickBestSequence(verticalScans, NORMAL_COLUMNS + 1);
+  const horizontalLines = pickBestSequence(horizontalScans, NORMAL_ROWS + 1);
+  if (!verticalLines || !horizontalLines) {
+    return null;
+  }
+
+  return {
+    orientation,
+    score: scoreLayout(rotated, verticalLines, horizontalLines),
+    imageData: rotated,
+    verticalLines,
+    horizontalLines,
+  };
+}
+
+function rectToOverlay(rect: Rect, label: string) {
+  return { ...rect, label };
 }
 
 export async function detectNormalDrillLayout(normalizedDataUrl: string): Promise<LayoutDetectionResult> {
@@ -251,99 +366,39 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
   const imageData = context.getImageData(0, 0, image.width, image.height);
 
   const orientations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
-  let best =
-    orientations
-      .map((orientation) => ({ orientation, ...scoreOrientation(imageData, orientation) }))
-      .sort((a, b) => b.score - a.score)[0] ?? null;
+  const candidates = orientations
+    .map((orientation) => detectOrientation(imageData, orientation))
+    .filter((candidate): candidate is OrientationResult => candidate !== null)
+    .sort((a, b) => b.score - a.score);
 
+  const best = candidates[0];
   if (!best || best.score < MIN_GRID_SCORE) {
     return {
       status: 'fail',
       confidence: 0,
-      warning: 'Could not find a stable normal-drill grid.',
+      warning: 'Could not find a stable normal-drill layout.',
       orientation: 0,
       bounds: { x: 0, y: 0, width: image.width, height: image.height },
-      answerGrid: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      topRow: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      leftColumn: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      subtotalArea: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      totalArea: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
+      answerCells: [],
+      topRowCells: [],
+      leftColumnCells: [],
+      subtotalRects: [],
+      totalRect: null,
       verticalLines: [],
       horizontalLines: [],
       overlayRects: [],
     };
   }
 
-  const rotated = best.rotated;
-  const gridVertical = pickBestSequence(best.verticalBands, NORMAL_COLUMNS + 1);
-  const gridHorizontal = pickBestSequence(best.horizontalBands, NORMAL_ROWS + 1);
-  if (!gridVertical || !gridHorizontal) {
-    return {
-      status: 'fail',
-      confidence: 0,
-      warning: 'Could not confirm the grid structure after orientation search.',
-      orientation: best.orientation,
-      bounds: { x: 0, y: 0, width: rotated.width, height: rotated.height },
-      answerGrid: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      topRow: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      leftColumn: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      subtotalArea: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      totalArea: region({ x: 0, y: 0, width: 0, height: 0 }, 0),
-      verticalLines: [],
-      horizontalLines: [],
-      overlayRects: [],
-    };
-  }
-
-  const bounds = rectFromLines(gridVertical, gridHorizontal);
-  const cellWidth = bounds.width / NORMAL_COLUMNS;
-  const cellHeight = bounds.height / NORMAL_ROWS;
-  const topRowHeight = cellHeight * 0.92;
-  const leftColumnWidth = cellWidth * 0.92;
-  const subtotalHeight = cellHeight * 0.9;
-  const totalHeight = cellHeight * 0.9;
-
-  const answerGridRect = expandRect(bounds, cellWidth * REGION_PADDING_CELL, cellHeight * REGION_PADDING_CELL, rotated.width, rotated.height);
-  const topRowRect = {
-    x: bounds.x,
-    y: Math.max(0, bounds.y - topRowHeight - cellHeight * SUBTOTAL_OFFSET_CELL),
-    width: bounds.width,
-    height: topRowHeight,
-  };
-  const leftColumnRect = {
-    x: Math.max(0, bounds.x - leftColumnWidth - cellWidth * 0.12),
-    y: bounds.y,
-    width: leftColumnWidth,
-    height: bounds.height,
-  };
-  const subtotalRect = {
-    x: bounds.x,
-    y: clamp(bounds.y + bounds.height + cellHeight * SUBTOTAL_OFFSET_CELL, 0, rotated.height),
-    width: Math.max(bounds.width * 0.95, cellWidth * 3.5),
-    height: subtotalHeight,
-  };
-  const totalRect = {
-    x: bounds.x,
-    y: clamp(subtotalRect.y + subtotalRect.height + cellHeight * TOTAL_OFFSET_CELL * 0.4, 0, rotated.height),
-    width: cellWidth * 2.2,
-    height: totalHeight,
-  };
-
-  const confidence = clamp(
-    (gridVertical.reduce((sum, line) => sum + line.strength, 0) / gridVertical.length +
-      gridHorizontal.reduce((sum, line) => sum + line.strength, 0) / gridHorizontal.length) /
-      2 +
-      0.1,
-    0,
-    1,
-  );
-
+  const bounds = rectFromLines(best.verticalLines, best.horizontalLines);
+  const fields = fieldRectsFromGrid(bounds, best.verticalLines, best.horizontalLines, best.imageData.width, best.imageData.height);
+  const confidence = clamp(best.score, 0, 1);
   const overlayRects = [
-    { ...answerGridRect, label: 'Answer grid' },
-    { ...topRowRect, label: 'Top row' },
-    { ...leftColumnRect, label: 'Left column' },
-    { ...subtotalRect, label: 'Subtotal area' },
-    { ...totalRect, label: 'Total area' },
+    ...fields.answerCells.map((rect, index) => rectToOverlay(rect, `Answer ${index + 1}`)),
+    ...fields.topRowCells.map((rect, index) => rectToOverlay(rect, `Top ${index + 1}`)),
+    ...fields.leftColumnCells.map((rect, index) => rectToOverlay(rect, `Left ${index + 1}`)),
+    ...fields.subtotalRects.map((rect, index) => rectToOverlay(rect, `Subtotal ${index + 1}`)),
+    ...(fields.totalRect ? [rectToOverlay(fields.totalRect, 'Total')] : []),
   ];
 
   return {
@@ -351,13 +406,13 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
     confidence,
     orientation: best.orientation,
     bounds,
-    answerGrid: region(answerGridRect, confidence),
-    topRow: region(topRowRect, confidence * 0.85),
-    leftColumn: region(leftColumnRect, confidence * 0.85),
-    subtotalArea: region(subtotalRect, confidence * 0.7),
-    totalArea: region(totalRect, confidence * 0.7),
-    verticalLines: gridVertical,
-    horizontalLines: gridHorizontal,
+    answerCells: fields.answerCells,
+    topRowCells: fields.topRowCells,
+    leftColumnCells: fields.leftColumnCells,
+    subtotalRects: fields.subtotalRects,
+    totalRect: fields.totalRect,
+    verticalLines: best.verticalLines,
+    horizontalLines: best.horizontalLines,
     overlayRects,
   };
 }

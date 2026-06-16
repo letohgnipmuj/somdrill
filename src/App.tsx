@@ -186,21 +186,21 @@ export default function App() {
                       <strong>{Math.round(layout.confidence * 100)}%</strong>
                     </div>
                     <div>
-                      <span>Answer grid</span>
+                      <span>Answer cells</span>
                       <strong>
-                        {Math.round(layout.answerGrid.rect.width)} x {Math.round(layout.answerGrid.rect.height)}
+                        {layout.answerCells.length}
                       </strong>
                     </div>
                     <div>
-                      <span>Top row</span>
+                      <span>Top row cells</span>
                       <strong>
-                        {Math.round(layout.topRow.rect.width)} x {Math.round(layout.topRow.rect.height)}
+                        {layout.topRowCells.length}
                       </strong>
                     </div>
                     <div>
-                      <span>Left column</span>
+                      <span>Left column cells</span>
                       <strong>
-                        {Math.round(layout.leftColumn.rect.width)} x {Math.round(layout.leftColumn.rect.height)}
+                        {layout.leftColumnCells.length}
                       </strong>
                     </div>
                     <div>
