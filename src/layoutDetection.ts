@@ -1,11 +1,12 @@
 const NORMAL_COLUMNS = 5;
 const NORMAL_ROWS = 8;
-const BAND_THRESHOLD_RATIO = 0.22;
-const MIN_GRID_SCORE = 0.14;
-const MIN_LINE_SPACING = 14;
-const MAX_LINE_SPACING_VARIANCE = 0.42;
-const CELL_PADDING_RATIO = 0.18;
-const FIELD_PADDING_RATIO = 0.1;
+const CANONICAL_WIDTH = 1200;
+const CANONICAL_HEIGHT = 1600;
+const MIN_GRID_SCORE = 0.18;
+const MIN_STRIPE_STRENGTH = 0.14;
+const MAX_SPACING_VARIANCE = 0.32;
+const MAX_CONSISTENCY_ERROR = 0.22;
+const CELL_PADDING_RATIO = 0.16;
 
 export type Rect = {
   x: number;
@@ -18,6 +19,27 @@ export type GridLine = {
   position: number;
   thickness: number;
   strength: number;
+};
+
+export type TransformMetadata = {
+  sourceBounds: Rect;
+  canonicalWidth: number;
+  canonicalHeight: number;
+  scaleX: number;
+  scaleY: number;
+  rotation: 0 | 90 | 180 | 270;
+};
+
+export type LayoutDiagnostics = {
+  chosenHypothesis: string;
+  transform: TransformMetadata;
+  fieldConfidence: number;
+  rejectionReason?: string;
+  stripeSummary: {
+    vertical: number;
+    horizontal: number;
+  };
+  rectangleConsistency: number;
 };
 
 export type LayoutDetectionResult = {
@@ -34,6 +56,10 @@ export type LayoutDetectionResult = {
   verticalLines: GridLine[];
   horizontalLines: GridLine[];
   overlayRects: Array<Rect & { label: string }>;
+  warpedCanvasWidth: number;
+  warpedCanvasHeight: number;
+  warpedDataUrl: string | null;
+  diagnostics: LayoutDiagnostics;
 };
 
 type ImageDataLike = {
@@ -42,18 +68,21 @@ type ImageDataLike = {
   data: Uint8ClampedArray;
 };
 
-type LineScanResult = {
-  position: number;
+type Stripe = {
+  start: number;
+  end: number;
+  center: number;
   thickness: number;
   strength: number;
 };
 
-type OrientationResult = {
+type OrientationCandidate = {
   orientation: 0 | 90 | 180 | 270;
-  score: number;
   imageData: ImageDataLike;
-  verticalLines: GridLine[];
-  horizontalLines: GridLine[];
+  verticalStripes: Stripe[];
+  horizontalStripes: Stripe[];
+  score: number;
+  hypothesis: string;
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -127,15 +156,15 @@ function rotateImageData(imageData: ImageDataLike, rotation: 0 | 90 | 180 | 270)
   return { width: dstWidth, height: dstHeight, data: dst };
 }
 
-function scanLines(imageData: ImageDataLike, axis: 'x' | 'y'): LineScanResult[] {
+function scanAxis(imageData: ImageDataLike, axis: 'x' | 'y') {
   const { width, height, data } = imageData;
   const length = axis === 'x' ? width : height;
   const cross = axis === 'x' ? height : width;
-  const scans: LineScanResult[] = [];
+  const intensities: number[] = [];
 
   for (let primary = 0; primary < length; primary += 1) {
-    let darkPixels = 0;
-    let edgeChanges = 0;
+    let darkRatio = 0;
+    let edgeEnergy = 0;
     let lastDark = false;
 
     for (let secondary = 0; secondary < cross; secondary += 1) {
@@ -144,116 +173,122 @@ function scanLines(imageData: ImageDataLike, axis: 'x' | 'y'): LineScanResult[] 
       const idx = (y * width + x) * 4;
       const gray = toGray(data, idx);
       const isDark = gray < 170;
-      if (isDark) darkPixels += 1;
-      if (secondary > 0 && isDark !== lastDark) edgeChanges += 1;
+      if (isDark) darkRatio += 1;
+      if (secondary > 0 && isDark !== lastDark) edgeEnergy += 1;
       lastDark = isDark;
     }
 
-    const darkRatio = darkPixels / cross;
-    const continuity = edgeChanges / cross;
-    const strength = darkRatio * 0.8 + continuity * 0.2;
-    scans.push({ position: primary, thickness: 1, strength });
+    intensities.push((darkRatio / cross) * 0.75 + (edgeEnergy / cross) * 0.25);
   }
 
-  return scans;
+  return intensities;
 }
 
-function collectPeaks(scans: LineScanResult[]): GridLine[] {
-  const peaks: GridLine[] = [];
-  for (let i = 1; i < scans.length - 1; i += 1) {
-    const current = scans[i];
-    if (current.strength < BAND_THRESHOLD_RATIO) continue;
-    if (current.strength < scans[i - 1].strength || current.strength < scans[i + 1].strength) continue;
-
-    let start = i;
-    let end = i;
-    while (start > 0 && scans[start - 1].strength >= BAND_THRESHOLD_RATIO * 0.68) start -= 1;
-    while (end < scans.length - 1 && scans[end + 1].strength >= BAND_THRESHOLD_RATIO * 0.68) end += 1;
-    const strength = scans.slice(start, end + 1).reduce((sum, line) => sum + line.strength, 0) / (end - start + 1);
-    peaks.push({
-      position: Math.round((start + end) / 2),
-      thickness: end - start + 1,
-      strength,
-    });
-    i = end;
-  }
-  return peaks.sort((a, b) => b.strength - a.strength);
-}
-
-function pickBestSequence(lines: GridLine[], count: number): GridLine[] | null {
-  if (lines.length < count) return null;
-
-  const sorted = [...lines].sort((a, b) => a.position - b.position);
-  let best: { score: number; sequence: GridLine[] } | null = null;
-
-  for (let start = 0; start <= sorted.length - count; start += 1) {
-    const sequence = sorted.slice(start, start + count);
-    const spacings = [];
-    for (let i = 1; i < sequence.length; i += 1) {
-      spacings.push(sequence[i].position - sequence[i - 1].position);
+function groupStripes(intensities: number[]): Stripe[] {
+  const stripes: Stripe[] = [];
+  let index = 0;
+  while (index < intensities.length) {
+    if (intensities[index] < MIN_STRIPE_STRENGTH) {
+      index += 1;
+      continue;
     }
-    const meanSpacing = spacings.reduce((sum, value) => sum + value, 0) / spacings.length;
-    if (meanSpacing < MIN_LINE_SPACING) continue;
+
+    const start = index;
+    let strength = 0;
+    let end = index;
+    while (end < intensities.length && intensities[end] >= MIN_STRIPE_STRENGTH * 0.75) {
+      strength += intensities[end];
+      end += 1;
+    }
+
+    const stripeEnd = end - 1;
+    const thickness = stripeEnd - start + 1;
+    stripes.push({
+      start,
+      end: stripeEnd,
+      center: (start + stripeEnd) / 2,
+      thickness,
+      strength: strength / thickness,
+    });
+    index = end;
+  }
+
+  return stripes;
+}
+
+function buildLines(stripes: Stripe[]): GridLine[] {
+  return stripes.map((stripe) => ({
+    position: Math.round(stripe.center),
+    thickness: stripe.thickness,
+    strength: stripe.strength,
+  }));
+}
+
+function sampleBestSequence(stripes: Stripe[], count: number) {
+  if (stripes.length < count) return null;
+
+  const ordered = [...stripes].sort((a, b) => a.center - b.center);
+  let best: { score: number; sequence: Stripe[]; error: number } | null = null;
+
+  for (let start = 0; start <= ordered.length - count; start += 1) {
+    const sequence = ordered.slice(start, start + count);
+    const gaps: number[] = [];
+    for (let i = 1; i < sequence.length; i += 1) {
+      gaps.push(sequence[i].center - sequence[i - 1].center);
+    }
+
+    const meanGap = gaps.reduce((sum, value) => sum + value, 0) / gaps.length;
+    if (meanGap < 12) continue;
     const variance =
-      spacings.reduce((sum, value) => sum + (value - meanSpacing) ** 2, 0) / Math.max(1, spacings.length);
-    const normalizedVariance = Math.sqrt(variance) / meanSpacing;
-    if (normalizedVariance > MAX_LINE_SPACING_VARIANCE) continue;
-    const strength = sequence.reduce((sum, line) => sum + line.strength, 0) / sequence.length;
+      gaps.reduce((sum, value) => sum + (value - meanGap) ** 2, 0) / Math.max(1, gaps.length);
+    const normalizedVariance = Math.sqrt(variance) / meanGap;
+    if (normalizedVariance > MAX_SPACING_VARIANCE) continue;
+
+    const strength = sequence.reduce((sum, stripe) => sum + stripe.strength, 0) / sequence.length;
     const score = strength - normalizedVariance;
     if (!best || score > best.score) {
-      best = { score, sequence };
+      best = { score, sequence, error: normalizedVariance };
     }
   }
 
-  return best?.sequence ?? null;
+  return best;
 }
 
-function expandRect(rect: Rect, padX: number, padY: number, maxWidth: number, maxHeight: number): Rect {
-  const x = clamp(rect.x - padX, 0, maxWidth);
-  const y = clamp(rect.y - padY, 0, maxHeight);
-  const right = clamp(rect.x + rect.width + padX, 0, maxWidth);
-  const bottom = clamp(rect.y + rect.height + padY, 0, maxHeight);
+function estimateBounds(vertical: Stripe[], horizontal: Stripe[]): Rect {
   return {
-    x,
-    y,
-    width: Math.max(1, right - x),
-    height: Math.max(1, bottom - y),
+    x: Math.max(0, vertical[0].start - 1),
+    y: Math.max(0, horizontal[0].start - 1),
+    width: Math.max(1, vertical[vertical.length - 1].end - vertical[0].start + 2),
+    height: Math.max(1, horizontal[horizontal.length - 1].end - horizontal[0].start + 2),
   };
 }
 
-function rectFromLines(vertical: GridLine[], horizontal: GridLine[]): Rect {
+function buildWarp(imageData: ImageDataLike, bounds: Rect) {
+  const { canvas, context } = createCanvas(CANONICAL_WIDTH, CANONICAL_HEIGHT);
+  const source = createCanvas(imageData.width, imageData.height);
+  source.context.putImageData(new ImageData(imageData.data, imageData.width, imageData.height), 0, 0);
+
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(
+    source.canvas,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    0,
+    0,
+    CANONICAL_WIDTH,
+    CANONICAL_HEIGHT,
+  );
+
   return {
-    x: vertical[0].position,
-    y: horizontal[0].position,
-    width: Math.max(1, vertical[vertical.length - 1].position - vertical[0].position),
-    height: Math.max(1, horizontal[horizontal.length - 1].position - horizontal[0].position),
+    canvas,
+    dataUrl: canvas.toDataURL('image/png'),
   };
 }
 
-function cellRectsFromLines(vertical: GridLine[], horizontal: GridLine[], paddingRatio: number): Rect[] {
-  const rects: Rect[] = [];
-  for (let row = 0; row < horizontal.length - 1; row += 1) {
-    for (let col = 0; col < vertical.length - 1; col += 1) {
-      const left = vertical[col].position;
-      const right = vertical[col + 1].position;
-      const top = horizontal[row].position;
-      const bottom = horizontal[row + 1].position;
-      const width = right - left;
-      const height = bottom - top;
-      const padX = width * paddingRatio;
-      const padY = height * paddingRatio;
-      rects.push({
-        x: left + padX,
-        y: top + padY,
-        width: Math.max(1, width - padX * 2),
-        height: Math.max(1, height - padY * 2),
-      });
-    }
-  }
-  return rects;
-}
-
-function fieldRectsFromGrid(
+function pointRectsFromGrid(
   bounds: Rect,
   vertical: GridLine[],
   horizontal: GridLine[],
@@ -262,25 +297,45 @@ function fieldRectsFromGrid(
 ) {
   const cellWidth = bounds.width / NORMAL_COLUMNS;
   const cellHeight = bounds.height / NORMAL_ROWS;
-  const answerCells = cellRectsFromLines(vertical, horizontal, CELL_PADDING_RATIO);
+  const answerCells: Rect[] = [];
   const topRowCells: Rect[] = [];
   const leftColumnCells: Rect[] = [];
   const subtotalRects: Rect[] = [];
 
-  const topBandHeight = cellHeight * 0.9;
-  const leftBandWidth = cellWidth * 0.95;
-  const subtotalBandHeight = cellHeight * 0.85;
-  const totalBandHeight = cellHeight * 0.9;
+  for (let row = 0; row < NORMAL_ROWS; row += 1) {
+    for (let col = 0; col < NORMAL_COLUMNS; col += 1) {
+      const left = vertical[col].position;
+      const right = vertical[col + 1].position;
+      const top = horizontal[row].position;
+      const bottom = horizontal[row + 1].position;
+      const width = right - left;
+      const height = bottom - top;
+      const padX = width * CELL_PADDING_RATIO;
+      const padY = height * CELL_PADDING_RATIO;
+      answerCells.push({
+        x: left + padX,
+        y: top + padY,
+        width: Math.max(1, width - padX * 2),
+        height: Math.max(1, height - padY * 2),
+      });
+    }
+  }
 
   for (let col = 0; col < NORMAL_COLUMNS; col += 1) {
     const left = vertical[col].position;
     const right = vertical[col + 1].position;
     const width = right - left;
     topRowCells.push({
-      x: left + width * FIELD_PADDING_RATIO,
-      y: Math.max(0, bounds.y - topBandHeight - cellHeight * 0.2),
-      width: Math.max(1, width - width * FIELD_PADDING_RATIO * 2),
-      height: topBandHeight,
+      x: left + width * 0.14,
+      y: Math.max(0, bounds.y - cellHeight * 0.86),
+      width: Math.max(1, width * 0.72),
+      height: cellHeight * 0.72,
+    });
+    subtotalRects.push({
+      x: left + width * 0.18,
+      y: clamp(bounds.y + bounds.height + cellHeight * 0.16, 0, imageHeight),
+      width: Math.max(1, width * 0.62),
+      height: cellHeight * 0.62,
     });
   }
 
@@ -289,30 +344,18 @@ function fieldRectsFromGrid(
     const bottom = horizontal[row + 1].position;
     const height = bottom - top;
     leftColumnCells.push({
-      x: Math.max(0, bounds.x - leftBandWidth - cellWidth * 0.14),
-      y: top + height * FIELD_PADDING_RATIO,
-      width: leftBandWidth,
-      height: Math.max(1, height - height * FIELD_PADDING_RATIO * 2),
-    });
-  }
-
-  for (let col = 0; col < NORMAL_COLUMNS; col += 1) {
-    const left = vertical[col].position;
-    const right = vertical[col + 1].position;
-    const width = right - left;
-    subtotalRects.push({
-      x: left + width * 0.18,
-      y: clamp(bounds.y + bounds.height + cellHeight * 0.2, 0, imageHeight),
-      width: Math.max(1, width * 0.65),
-      height: subtotalBandHeight,
+      x: Math.max(0, bounds.x - cellWidth * 0.88),
+      y: top + height * 0.14,
+      width: cellWidth * 0.68,
+      height: Math.max(1, height * 0.72),
     });
   }
 
   const totalRect: Rect = {
     x: vertical[0].position,
-    y: clamp(bounds.y + bounds.height + subtotalBandHeight + cellHeight * 0.32, 0, imageHeight),
-    width: Math.max(1, vertical[1].position - vertical[0].position + cellWidth * 0.25),
-    height: totalBandHeight,
+    y: clamp(bounds.y + bounds.height + cellHeight * 0.88, 0, imageHeight),
+    width: Math.max(1, vertical[1].position - vertical[0].position + cellWidth * 0.2),
+    height: cellHeight * 0.72,
   };
 
   return {
@@ -324,34 +367,49 @@ function fieldRectsFromGrid(
   };
 }
 
-function scoreLayout(
+function gridConsistency(vertical: GridLine[], horizontal: GridLine[]) {
+  const vGaps = vertical.slice(1).map((line, index) => line.position - vertical[index].position);
+  const hGaps = horizontal.slice(1).map((line, index) => line.position - horizontal[index].position);
+  const meanV = vGaps.reduce((sum, value) => sum + value, 0) / vGaps.length;
+  const meanH = hGaps.reduce((sum, value) => sum + value, 0) / hGaps.length;
+  const vError = Math.sqrt(vGaps.reduce((sum, value) => sum + (value - meanV) ** 2, 0) / vGaps.length) / meanV;
+  const hError = Math.sqrt(hGaps.reduce((sum, value) => sum + (value - meanH) ** 2, 0) / hGaps.length) / meanH;
+  return clamp(1 - (vError + hError) / 2, 0, 1);
+}
+
+function scoreCandidate(
   imageData: ImageDataLike,
   vertical: GridLine[],
   horizontal: GridLine[],
-): number {
-  const bounds = rectFromLines(vertical, horizontal);
+  consistency: number,
+) {
+  const bounds = estimateBounds(vertical, horizontal);
   const coverage = (bounds.width * bounds.height) / (imageData.width * imageData.height);
   const verticalStrength = vertical.reduce((sum, line) => sum + line.strength, 0) / vertical.length;
   const horizontalStrength = horizontal.reduce((sum, line) => sum + line.strength, 0) / horizontal.length;
-  return verticalStrength * 0.4 + horizontalStrength * 0.4 + coverage * 0.2;
+  return verticalStrength * 0.35 + horizontalStrength * 0.35 + coverage * 0.15 + consistency * 0.15;
 }
 
-function detectOrientation(imageData: ImageDataLike, orientation: 0 | 90 | 180 | 270): OrientationResult | null {
+function detectOrientation(imageData: ImageDataLike, orientation: 0 | 90 | 180 | 270): OrientationCandidate | null {
   const rotated = rotateImageData(imageData, orientation);
-  const verticalScans = collectPeaks(scanLines(rotated, 'x'));
-  const horizontalScans = collectPeaks(scanLines(rotated, 'y'));
-  const verticalLines = pickBestSequence(verticalScans, NORMAL_COLUMNS + 1);
-  const horizontalLines = pickBestSequence(horizontalScans, NORMAL_ROWS + 1);
-  if (!verticalLines || !horizontalLines) {
-    return null;
-  }
+  const verticalStripes = groupStripes(scanAxis(rotated, 'x'));
+  const horizontalStripes = groupStripes(scanAxis(rotated, 'y'));
+  const verticalSequence = sampleBestSequence(verticalStripes, NORMAL_COLUMNS + 1);
+  const horizontalSequence = sampleBestSequence(horizontalStripes, NORMAL_ROWS + 1);
+  if (!verticalSequence || !horizontalSequence) return null;
+
+  const vertical = buildLines(verticalSequence.sequence);
+  const horizontal = buildLines(horizontalSequence.sequence);
+  const consistency = gridConsistency(vertical, horizontal);
+  const score = scoreCandidate(rotated, vertical, horizontal, consistency);
 
   return {
     orientation,
-    score: scoreLayout(rotated, verticalLines, horizontalLines),
     imageData: rotated,
-    verticalLines,
-    horizontalLines,
+    verticalStripes: verticalSequence.sequence,
+    horizontalStripes: horizontalSequence.sequence,
+    score,
+    hypothesis: `rotated-${orientation}-stripe-clustering`,
   };
 }
 
@@ -365,18 +423,20 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
   context.drawImage(image, 0, 0);
   const imageData = context.getImageData(0, 0, image.width, image.height);
 
-  const orientations: Array<0 | 90 | 180 | 270> = [0, 90, 180, 270];
-  const candidates = orientations
+  const candidates = ([0, 90, 180, 270] as const)
     .map((orientation) => detectOrientation(imageData, orientation))
-    .filter((candidate): candidate is OrientationResult => candidate !== null)
+    .filter((candidate): candidate is OrientationCandidate => candidate !== null)
     .sort((a, b) => b.score - a.score);
 
   const best = candidates[0];
   if (!best || best.score < MIN_GRID_SCORE) {
+    const rejectionReason = best
+      ? 'Layout geometry was too inconsistent to trust.'
+      : 'Could not find a stable normal-drill stripe pattern.';
     return {
       status: 'fail',
       confidence: 0,
-      warning: 'Could not find a stable normal-drill layout.',
+      warning: rejectionReason,
       orientation: 0,
       bounds: { x: 0, y: 0, width: image.width, height: image.height },
       answerCells: [],
@@ -387,12 +447,76 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
       verticalLines: [],
       horizontalLines: [],
       overlayRects: [],
+      warpedCanvasWidth: CANONICAL_WIDTH,
+      warpedCanvasHeight: CANONICAL_HEIGHT,
+      warpedDataUrl: null,
+      diagnostics: {
+        chosenHypothesis: best?.hypothesis ?? 'none',
+        transform: {
+          sourceBounds: { x: 0, y: 0, width: image.width, height: image.height },
+          canonicalWidth: CANONICAL_WIDTH,
+          canonicalHeight: CANONICAL_HEIGHT,
+          scaleX: CANONICAL_WIDTH / image.width,
+          scaleY: CANONICAL_HEIGHT / image.height,
+          rotation: 0,
+        },
+        fieldConfidence: 0,
+        rejectionReason,
+        stripeSummary: {
+          vertical: best?.verticalStripes.length ?? 0,
+          horizontal: best?.horizontalStripes.length ?? 0,
+        },
+        rectangleConsistency: 0,
+      },
     };
   }
 
-  const bounds = rectFromLines(best.verticalLines, best.horizontalLines);
-  const fields = fieldRectsFromGrid(bounds, best.verticalLines, best.horizontalLines, best.imageData.width, best.imageData.height);
-  const confidence = clamp(best.score, 0, 1);
+  const vertical = buildLines(best.verticalStripes);
+  const horizontal = buildLines(best.horizontalStripes);
+  const bounds = estimateBounds(vertical, horizontal);
+  const fields = pointRectsFromGrid(bounds, vertical, horizontal, image.width, image.height);
+  const consistency = gridConsistency(vertical, horizontal);
+  const confidence = clamp(best.score * 0.65 + consistency * 0.35, 0, 1);
+  const warp = buildWarp(best.imageData, bounds);
+  const consistencyError = 1 - consistency;
+  if (consistencyError > MAX_CONSISTENCY_ERROR) {
+    return {
+      status: 'fail',
+      confidence,
+      warning: 'Detected grid stripes were too irregular to trust.',
+      orientation: best.orientation,
+      bounds,
+      answerCells: [],
+      topRowCells: [],
+      leftColumnCells: [],
+      subtotalRects: [],
+      totalRect: null,
+      verticalLines: vertical,
+      horizontalLines: horizontal,
+      overlayRects: [],
+      warpedCanvasWidth: CANONICAL_WIDTH,
+      warpedCanvasHeight: CANONICAL_HEIGHT,
+      warpedDataUrl: warp.dataUrl,
+      diagnostics: {
+        chosenHypothesis: best.hypothesis,
+        transform: {
+          sourceBounds: bounds,
+          canonicalWidth: CANONICAL_WIDTH,
+          canonicalHeight: CANONICAL_HEIGHT,
+          scaleX: CANONICAL_WIDTH / bounds.width,
+          scaleY: CANONICAL_HEIGHT / bounds.height,
+          rotation: best.orientation,
+        },
+        fieldConfidence: confidence,
+        rejectionReason: 'Rectangle consistency was too low.',
+        stripeSummary: {
+          vertical: best.verticalStripes.length,
+          horizontal: best.horizontalStripes.length,
+        },
+        rectangleConsistency: consistency,
+      },
+    };
+  }
   const overlayRects = [
     ...fields.answerCells.map((rect, index) => rectToOverlay(rect, `Answer ${index + 1}`)),
     ...fields.topRowCells.map((rect, index) => rectToOverlay(rect, `Top ${index + 1}`)),
@@ -401,8 +525,17 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
     ...(fields.totalRect ? [rectToOverlay(fields.totalRect, 'Total')] : []),
   ];
 
+  const transform: TransformMetadata = {
+    sourceBounds: bounds,
+    canonicalWidth: CANONICAL_WIDTH,
+    canonicalHeight: CANONICAL_HEIGHT,
+    scaleX: CANONICAL_WIDTH / bounds.width,
+    scaleY: CANONICAL_HEIGHT / bounds.height,
+    rotation: best.orientation,
+  };
+
   return {
-    status: 'pass',
+    status: confidence >= MIN_GRID_SCORE ? 'pass' : 'fail',
     confidence,
     orientation: best.orientation,
     bounds,
@@ -411,8 +544,21 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
     leftColumnCells: fields.leftColumnCells,
     subtotalRects: fields.subtotalRects,
     totalRect: fields.totalRect,
-    verticalLines: best.verticalLines,
-    horizontalLines: best.horizontalLines,
+    verticalLines: vertical,
+    horizontalLines: horizontal,
     overlayRects,
+    warpedCanvasWidth: CANONICAL_WIDTH,
+    warpedCanvasHeight: CANONICAL_HEIGHT,
+    warpedDataUrl: warp.dataUrl,
+    diagnostics: {
+      chosenHypothesis: best.hypothesis,
+      transform,
+      fieldConfidence: confidence,
+      stripeSummary: {
+        vertical: best.verticalStripes.length,
+        horizontal: best.horizontalStripes.length,
+      },
+      rectangleConsistency: consistency,
+    },
   };
 }

@@ -138,16 +138,23 @@ export default function App() {
 
             {result.status === 'pass' && result.normalizedDataUrl && (
               <div className="preview">
-                <h3>Normalized preview</h3>
+                <h3>Canonical warp preview</h3>
                 <div
                   className="preview-stage"
-                  style={{ aspectRatio: `${result.normalizedWidth} / ${result.normalizedHeight}` }}
+                  style={{
+                    aspectRatio: `${layout?.warpedCanvasWidth ?? result.normalizedWidth} / ${
+                      layout?.warpedCanvasHeight ?? result.normalizedHeight
+                    }`,
+                  }}
                 >
-                  <img src={result.normalizedDataUrl} alt="Normalized drill preview" />
+                  <img
+                    src={layout?.status === 'pass' && layout.warpedDataUrl ? layout.warpedDataUrl : result.normalizedDataUrl}
+                    alt="Canonical drill preview"
+                  />
                   {layout?.status === 'pass' && (
                     <svg
                       className="overlay"
-                      viewBox={`0 0 ${result.normalizedWidth} ${result.normalizedHeight}`}
+                      viewBox={`0 0 ${layout.warpedCanvasWidth} ${layout.warpedCanvasHeight}`}
                       aria-hidden="true"
                     >
                       {layout.overlayRects.map((rect) => (
@@ -187,29 +194,39 @@ export default function App() {
                     </div>
                     <div>
                       <span>Answer cells</span>
-                      <strong>
-                        {layout.answerCells.length}
-                      </strong>
+                      <strong>{layout.answerCells.length}</strong>
                     </div>
                     <div>
                       <span>Top row cells</span>
-                      <strong>
-                        {layout.topRowCells.length}
-                      </strong>
+                      <strong>{layout.topRowCells.length}</strong>
                     </div>
                     <div>
                       <span>Left column cells</span>
-                      <strong>
-                        {layout.leftColumnCells.length}
-                      </strong>
+                      <strong>{layout.leftColumnCells.length}</strong>
                     </div>
                     <div>
                       <span>Warnings</span>
                       <strong>{layout.warning ?? 'None'}</strong>
                     </div>
+                    <div>
+                      <span>Hypothesis</span>
+                      <strong>{layout.diagnostics.chosenHypothesis}</strong>
+                    </div>
+                    <div>
+                      <span>Consistency</span>
+                      <strong>{Math.round(layout.diagnostics.rectangleConsistency * 100)}%</strong>
+                    </div>
+                    <div>
+                      <span>Warp</span>
+                      <strong>
+                        {layout.warpedCanvasWidth} x {layout.warpedCanvasHeight}
+                      </strong>
+                    </div>
                   </div>
                 ) : (
-                  <p className="layout-warning">{layout.warning ?? 'Unable to locate the grid.'}</p>
+                  <p className="layout-warning">
+                    {layout.warning ?? layout.diagnostics.rejectionReason ?? 'Unable to locate the grid.'}
+                  </p>
                 )}
               </div>
             )}
