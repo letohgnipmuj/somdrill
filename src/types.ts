@@ -15,4 +15,5 @@ export type PreflightResult = {
   normalizedWidth: number;
   normalizedHeight: number;
   normalizedDataUrl: string | null;
+  layoutDataUrl: string | null;
 };

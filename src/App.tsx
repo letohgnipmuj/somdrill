@@ -1,4 +1,4 @@
-import { useState } from 'react';
+﻿import { useState } from 'react';
 import { inspectImage } from './imageProcessing';
 import { detectNormalDrillLayout } from './layoutDetection';
 import type { PreflightResult } from './types';
@@ -31,8 +31,8 @@ export default function App() {
     try {
       const analysis = await inspectImage(file);
       setResult(analysis);
-      if (analysis.status === 'pass' && analysis.normalizedDataUrl) {
-        const detectedLayout = await detectNormalDrillLayout(analysis.normalizedDataUrl);
+      if (analysis.status === 'pass' && analysis.layoutDataUrl) {
+        const detectedLayout = await detectNormalDrillLayout(analysis.layoutDataUrl);
         setLayout(detectedLayout);
       }
     } catch (err) {
@@ -182,55 +182,83 @@ export default function App() {
                   </div>
                   <StatusBadge status={layout.status} />
                 </div>
-                {layout.status === 'pass' ? (
-                  <div className="layout-grid">
-                    <div>
-                      <span>Orientation</span>
-                      <strong>{layout.orientation}°</strong>
-                    </div>
-                    <div>
-                      <span>Confidence</span>
-                      <strong>{Math.round(layout.confidence * 100)}%</strong>
-                    </div>
-                    <div>
-                      <span>Answer cells</span>
-                      <strong>{layout.answerCells.length}</strong>
-                    </div>
-                    <div>
-                      <span>Top row cells</span>
-                      <strong>{layout.topRowCells.length}</strong>
-                    </div>
-                    <div>
-                      <span>Left column cells</span>
-                      <strong>{layout.leftColumnCells.length}</strong>
-                    </div>
-                    <div>
-                      <span>Warnings</span>
-                      <strong>{layout.warning ?? 'None'}</strong>
-                    </div>
-                    <div>
-                      <span>Hypothesis</span>
-                      <strong>{layout.diagnostics.chosenHypothesis}</strong>
-                    </div>
-                    <div>
-                      <span>Consistency</span>
-                      <strong>{Math.round(layout.diagnostics.rectangleConsistency * 100)}%</strong>
-                    </div>
-                    <div>
-                      <span>Warp</span>
-                      <strong>
-                        {layout.warpedCanvasWidth} x {layout.warpedCanvasHeight}
-                      </strong>
-                    </div>
+                <div className="layout-grid">
+                  <div>
+                    <span>Stage</span>
+                    <strong>{layout.diagnostics.stage}</strong>
                   </div>
-                ) : (
-                  <p className="layout-warning">
-                    {layout.warning ?? layout.diagnostics.rejectionReason ?? 'Unable to locate the grid.'}
+                  <div>
+                    <span>Orientation</span>
+                    <strong>{layout.orientation}°</strong>
+                  </div>
+                  <div>
+                    <span>Confidence</span>
+                    <strong>{Math.round(layout.confidence * 100)}%</strong>
+                  </div>
+                  <div>
+                    <span>Candidate score</span>
+                    <strong>{Math.round(layout.diagnostics.candidateScore * 1000) / 1000}</strong>
+                  </div>
+                  <div>
+                    <span>Answer cells</span>
+                    <strong>{layout.answerCells.length}</strong>
+                  </div>
+                  <div>
+                    <span>Top row cells</span>
+                    <strong>{layout.topRowCells.length}</strong>
+                  </div>
+                  <div>
+                    <span>Left column cells</span>
+                    <strong>{layout.leftColumnCells.length}</strong>
+                  </div>
+                  <div>
+                    <span>Warnings</span>
+                    <strong>{layout.warning ?? 'None'}</strong>
+                  </div>
+                  <div>
+                    <span>Hypothesis</span>
+                    <strong>{layout.diagnostics.chosenHypothesis}</strong>
+                  </div>
+                  <div>
+                    <span>Consistency</span>
+                    <strong>{Math.round(layout.diagnostics.rectangleConsistency * 100)}%</strong>
+                  </div>
+                  <div>
+                    <span>Grid bounds</span>
+                    <strong>
+                      {Math.round(layout.bounds.x)}, {Math.round(layout.bounds.y)} / {Math.round(layout.bounds.width)} x {Math.round(
+                        layout.bounds.height,
+                      )}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Content bounds</span>
+                    <strong>
+                      {layout.diagnostics.contentBounds
+                        ? `${Math.round(layout.diagnostics.contentBounds.x)}, ${Math.round(layout.diagnostics.contentBounds.y)} / ${Math.round(layout.diagnostics.contentBounds.width)} x ${Math.round(layout.diagnostics.contentBounds.height)}`
+                        : 'None'}
+                    </strong>
+                  </div>
+                </div>
+                <div className="layout-debug">
+                  <p className="summary-label">Debug</p>
+                  <p>{layout.warning ?? layout.diagnostics.rejectionReason ?? 'No layout warning.'}</p>
+                  <p>
+                    Stripe counts: V {layout.diagnostics.stripeSummary.vertical}, H {layout.diagnostics.stripeSummary.horizontal}
                   </p>
-                )}
+                  <p>
+                    Transform: rotation {layout.diagnostics.transform.rotation}°, scale {layout.diagnostics.transform.scaleX.toFixed(2)} x {layout.diagnostics.transform.scaleY.toFixed(2)}
+                  </p>
+                  <p>
+                    Source bounds: {Math.round(layout.diagnostics.transform.sourceBounds.x)}, {Math.round(
+                      layout.diagnostics.transform.sourceBounds.y,
+                    )} / {Math.round(layout.diagnostics.transform.sourceBounds.width)} x {Math.round(
+                      layout.diagnostics.transform.sourceBounds.height,
+                    )}
+                  </p>
+                </div>
               </div>
-            )}
-          </div>
+            )}          </div>
         )}
       </section>
     </main>

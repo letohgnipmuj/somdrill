@@ -2,11 +2,14 @@ const NORMAL_COLUMNS = 5;
 const NORMAL_ROWS = 8;
 const CANONICAL_WIDTH = 1200;
 const CANONICAL_HEIGHT = 1600;
-const MIN_GRID_SCORE = 0.18;
-const MIN_STRIPE_STRENGTH = 0.14;
-const MAX_SPACING_VARIANCE = 0.32;
-const MAX_CONSISTENCY_ERROR = 0.22;
+const MIN_GRID_SCORE = 0.12;
+const MIN_STRIPE_STRENGTH = 0.08;
+const MAX_SPACING_VARIANCE = 0.45;
+const MAX_CONSISTENCY_ERROR = 0.42;
 const CELL_PADDING_RATIO = 0.16;
+const CONTENT_DARK_THRESHOLD = 214;
+const CONTENT_MIN_DENSITY = 0.02;
+const CONTENT_MARGIN_RATIO = 0.035;
 
 export type Rect = {
   x: number;
@@ -31,9 +34,12 @@ export type TransformMetadata = {
 };
 
 export type LayoutDiagnostics = {
+  stage: 'pass' | 'no-candidate' | 'content-bounds' | 'stripe-fit' | 'consistency-check';
   chosenHypothesis: string;
   transform: TransformMetadata;
   fieldConfidence: number;
+  candidateScore: number;
+  contentBounds: Rect | null;
   rejectionReason?: string;
   stripeSummary: {
     vertical: number;
@@ -79,6 +85,7 @@ type Stripe = {
 type OrientationCandidate = {
   orientation: 0 | 90 | 180 | 270;
   imageData: ImageDataLike;
+  contentBounds: Rect;
   verticalStripes: Stripe[];
   horizontalStripes: Stripe[];
   score: number;
@@ -111,6 +118,10 @@ function loadImageFromSource(source: string): Promise<HTMLImageElement> {
 
 function toGray(data: Uint8ClampedArray, index: number) {
   return data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+}
+
+function isDarkPixel(data: Uint8ClampedArray, index: number, threshold = CONTENT_DARK_THRESHOLD) {
+  return toGray(data, index) < threshold;
 }
 
 function rotateImageData(imageData: ImageDataLike, rotation: 0 | 90 | 180 | 270): ImageDataLike {
@@ -184,6 +195,40 @@ function scanAxis(imageData: ImageDataLike, axis: 'x' | 'y') {
   return intensities;
 }
 
+function findContentBounds(imageData: ImageDataLike) {
+  const { width, height, data } = imageData;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  let darkCount = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = (y * width + x) * 4;
+      if (!isDarkPixel(data, idx)) continue;
+      darkCount += 1;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+
+  if (darkCount / (width * height) < CONTENT_MIN_DENSITY || maxX < minX || maxY < minY) {
+    return null;
+  }
+
+  const padX = Math.max(2, Math.round(width * CONTENT_MARGIN_RATIO));
+  const padY = Math.max(2, Math.round(height * CONTENT_MARGIN_RATIO));
+  return {
+    x: clamp(minX - padX, 0, width - 1),
+    y: clamp(minY - padY, 0, height - 1),
+    width: clamp(maxX - minX + 1 + padX * 2, 1, width),
+    height: clamp(maxY - minY + 1 + padY * 2, 1, height),
+  };
+}
+
 function groupStripes(intensities: number[]): Stripe[] {
   const stripes: Stripe[] = [];
   let index = 0;
@@ -238,7 +283,7 @@ function sampleBestSequence(stripes: Stripe[], count: number) {
     }
 
     const meanGap = gaps.reduce((sum, value) => sum + value, 0) / gaps.length;
-    if (meanGap < 12) continue;
+    if (meanGap < 8) continue;
     const variance =
       gaps.reduce((sum, value) => sum + (value - meanGap) ** 2, 0) / Math.max(1, gaps.length);
     const normalizedVariance = Math.sqrt(variance) / meanGap;
@@ -379,19 +424,24 @@ function gridConsistency(vertical: GridLine[], horizontal: GridLine[]) {
 
 function scoreCandidate(
   imageData: ImageDataLike,
-  vertical: GridLine[],
-  horizontal: GridLine[],
+  vertical: Stripe[],
+  horizontal: Stripe[],
   consistency: number,
+  orientation: 0 | 90 | 180 | 270,
 ) {
   const bounds = estimateBounds(vertical, horizontal);
   const coverage = (bounds.width * bounds.height) / (imageData.width * imageData.height);
   const verticalStrength = vertical.reduce((sum, line) => sum + line.strength, 0) / vertical.length;
   const horizontalStrength = horizontal.reduce((sum, line) => sum + line.strength, 0) / horizontal.length;
-  return verticalStrength * 0.35 + horizontalStrength * 0.35 + coverage * 0.15 + consistency * 0.15;
+  const orientationBias = orientation === 0 ? 0.04 : orientation === 180 ? 0.01 : -0.03;
+  return verticalStrength * 0.3 + horizontalStrength * 0.3 + coverage * 0.15 + consistency * 0.25 + orientationBias;
 }
 
 function detectOrientation(imageData: ImageDataLike, orientation: 0 | 90 | 180 | 270): OrientationCandidate | null {
   const rotated = rotateImageData(imageData, orientation);
+  const contentBounds = findContentBounds(rotated);
+  if (!contentBounds) return null;
+
   const verticalStripes = groupStripes(scanAxis(rotated, 'x'));
   const horizontalStripes = groupStripes(scanAxis(rotated, 'y'));
   const verticalSequence = sampleBestSequence(verticalStripes, NORMAL_COLUMNS + 1);
@@ -401,20 +451,32 @@ function detectOrientation(imageData: ImageDataLike, orientation: 0 | 90 | 180 |
   const vertical = buildLines(verticalSequence.sequence);
   const horizontal = buildLines(horizontalSequence.sequence);
   const consistency = gridConsistency(vertical, horizontal);
-  const score = scoreCandidate(rotated, vertical, horizontal, consistency);
+  const score = scoreCandidate(rotated, verticalSequence.sequence, horizontalSequence.sequence, consistency, orientation);
 
   return {
     orientation,
     imageData: rotated,
+    contentBounds,
     verticalStripes: verticalSequence.sequence,
     horizontalStripes: horizontalSequence.sequence,
     score,
-    hypothesis: `rotated-${orientation}-stripe-clustering`,
+    hypothesis: `rotated-${orientation}-content-bounds+stripe-clustering`,
   };
 }
 
 function rectToOverlay(rect: Rect, label: string) {
   return { ...rect, label };
+}
+
+function scaleRectToCanonical(rect: Rect, sourceBounds: Rect) {
+  const scaleX = CANONICAL_WIDTH / sourceBounds.width;
+  const scaleY = CANONICAL_HEIGHT / sourceBounds.height;
+  return {
+    x: (rect.x - sourceBounds.x) * scaleX,
+    y: (rect.y - sourceBounds.y) * scaleY,
+    width: rect.width * scaleX,
+    height: rect.height * scaleY,
+  };
 }
 
 export async function detectNormalDrillLayout(normalizedDataUrl: string): Promise<LayoutDetectionResult> {
@@ -451,6 +513,7 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
       warpedCanvasHeight: CANONICAL_HEIGHT,
       warpedDataUrl: null,
       diagnostics: {
+        stage: best ? 'stripe-fit' : 'no-candidate',
         chosenHypothesis: best?.hypothesis ?? 'none',
         transform: {
           sourceBounds: { x: 0, y: 0, width: image.width, height: image.height },
@@ -461,6 +524,8 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
           rotation: 0,
         },
         fieldConfidence: 0,
+        candidateScore: best?.score ?? 0,
+        contentBounds: best?.contentBounds ?? null,
         rejectionReason,
         stripeSummary: {
           vertical: best?.verticalStripes.length ?? 0,
@@ -473,11 +538,11 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
 
   const vertical = buildLines(best.verticalStripes);
   const horizontal = buildLines(best.horizontalStripes);
-  const bounds = estimateBounds(vertical, horizontal);
-  const fields = pointRectsFromGrid(bounds, vertical, horizontal, image.width, image.height);
+  const gridBounds = estimateBounds(best.verticalStripes, best.horizontalStripes);
+  const fields = pointRectsFromGrid(gridBounds, vertical, horizontal, image.width, image.height);
   const consistency = gridConsistency(vertical, horizontal);
   const confidence = clamp(best.score * 0.65 + consistency * 0.35, 0, 1);
-  const warp = buildWarp(best.imageData, bounds);
+  const warp = buildWarp(best.imageData, best.contentBounds);
   const consistencyError = 1 - consistency;
   if (consistencyError > MAX_CONSISTENCY_ERROR) {
     return {
@@ -485,7 +550,7 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
       confidence,
       warning: 'Detected grid stripes were too irregular to trust.',
       orientation: best.orientation,
-      bounds,
+      bounds: best.contentBounds,
       answerCells: [],
       topRowCells: [],
       leftColumnCells: [],
@@ -498,16 +563,19 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
       warpedCanvasHeight: CANONICAL_HEIGHT,
       warpedDataUrl: warp.dataUrl,
       diagnostics: {
+        stage: 'consistency-check',
         chosenHypothesis: best.hypothesis,
         transform: {
-          sourceBounds: bounds,
+          sourceBounds: best.contentBounds,
           canonicalWidth: CANONICAL_WIDTH,
           canonicalHeight: CANONICAL_HEIGHT,
-          scaleX: CANONICAL_WIDTH / bounds.width,
-          scaleY: CANONICAL_HEIGHT / bounds.height,
+          scaleX: CANONICAL_WIDTH / best.contentBounds.width,
+          scaleY: CANONICAL_HEIGHT / best.contentBounds.height,
           rotation: best.orientation,
         },
         fieldConfidence: confidence,
+        candidateScore: best.score,
+        contentBounds: best.contentBounds,
         rejectionReason: 'Rectangle consistency was too low.',
         stripeSummary: {
           vertical: best.verticalStripes.length,
@@ -518,19 +586,19 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
     };
   }
   const overlayRects = [
-    ...fields.answerCells.map((rect, index) => rectToOverlay(rect, `Answer ${index + 1}`)),
-    ...fields.topRowCells.map((rect, index) => rectToOverlay(rect, `Top ${index + 1}`)),
-    ...fields.leftColumnCells.map((rect, index) => rectToOverlay(rect, `Left ${index + 1}`)),
-    ...fields.subtotalRects.map((rect, index) => rectToOverlay(rect, `Subtotal ${index + 1}`)),
-    ...(fields.totalRect ? [rectToOverlay(fields.totalRect, 'Total')] : []),
+    ...fields.answerCells.map((rect, index) => rectToOverlay(scaleRectToCanonical(rect, best.contentBounds), `Answer ${index + 1}`)),
+    ...fields.topRowCells.map((rect, index) => rectToOverlay(scaleRectToCanonical(rect, best.contentBounds), `Top ${index + 1}`)),
+    ...fields.leftColumnCells.map((rect, index) => rectToOverlay(scaleRectToCanonical(rect, best.contentBounds), `Left ${index + 1}`)),
+    ...fields.subtotalRects.map((rect, index) => rectToOverlay(scaleRectToCanonical(rect, best.contentBounds), `Subtotal ${index + 1}`)),
+    ...(fields.totalRect ? [rectToOverlay(scaleRectToCanonical(fields.totalRect, best.contentBounds), 'Total')] : []),
   ];
 
   const transform: TransformMetadata = {
-    sourceBounds: bounds,
+    sourceBounds: best.contentBounds,
     canonicalWidth: CANONICAL_WIDTH,
     canonicalHeight: CANONICAL_HEIGHT,
-    scaleX: CANONICAL_WIDTH / bounds.width,
-    scaleY: CANONICAL_HEIGHT / bounds.height,
+    scaleX: CANONICAL_WIDTH / best.contentBounds.width,
+    scaleY: CANONICAL_HEIGHT / best.contentBounds.height,
     rotation: best.orientation,
   };
 
@@ -538,7 +606,7 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
     status: confidence >= MIN_GRID_SCORE ? 'pass' : 'fail',
     confidence,
     orientation: best.orientation,
-    bounds,
+    bounds: best.contentBounds,
     answerCells: fields.answerCells,
     topRowCells: fields.topRowCells,
     leftColumnCells: fields.leftColumnCells,
@@ -551,9 +619,12 @@ export async function detectNormalDrillLayout(normalizedDataUrl: string): Promis
     warpedCanvasHeight: CANONICAL_HEIGHT,
     warpedDataUrl: warp.dataUrl,
     diagnostics: {
+      stage: 'pass',
       chosenHypothesis: best.hypothesis,
       transform,
       fieldConfidence: confidence,
+      candidateScore: best.score,
+      contentBounds: best.contentBounds,
       stripeSummary: {
         vertical: best.verticalStripes.length,
         horizontal: best.horizontalStripes.length,

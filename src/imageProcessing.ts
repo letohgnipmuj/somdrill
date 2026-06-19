@@ -126,6 +126,18 @@ function generateNormalizedPreview(
   return canvas.toDataURL('image/png');
 }
 
+function generateLayoutSourceDataUrl(
+  image: HTMLImageElement,
+  targetWidth: number,
+  targetHeight: number,
+) {
+  const { canvas, context } = createCanvas(targetWidth, targetHeight);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+  return canvas.toDataURL('image/png');
+}
+
 function analyze(imageData: ImageData): Analysis {
   return computeStats(imageData.data, imageData.width, imageData.height);
 }
@@ -172,6 +184,7 @@ export async function inspectImage(file: File): Promise<PreflightResult> {
   const normalizedImageData = context.getImageData(0, 0, normalizedWidth, normalizedHeight);
   const analysis = analyze(normalizedImageData);
   const metrics = buildMetrics(analysis);
+  const layoutDataUrl = generateLayoutSourceDataUrl(image, normalizedWidth, normalizedHeight);
 
   const reasons: string[] = [];
   if (Math.min(normalizedWidth, normalizedHeight) < MIN_SHORT_SIDE) {
@@ -202,5 +215,6 @@ export async function inspectImage(file: File): Promise<PreflightResult> {
     normalizedWidth,
     normalizedHeight,
     normalizedDataUrl,
+    layoutDataUrl: status === 'pass' ? layoutDataUrl : null,
   };
 }
